@@ -1,0 +1,13 @@
+**
+!requirements.txt
+!requirements-server.txt
+!app.py
+!commerce.py
+!database.py
+!vault.py
+!wsgi.py
+!generate_users.py
+!migrate_database.py
+!style.css
+!deploy/
+!deploy/gunicorn.conf.py

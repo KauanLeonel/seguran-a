@@ -1,0 +1,82 @@
+services:
+  db:
+    image: postgres:17-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: campus
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_admin_password
+    secrets:
+      - db_admin_password
+      - db_app_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./deploy/init-db.sh:/docker-entrypoint-initdb.d/10-campus.sh:ro
+    networks: [database]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d campus"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      MARKET_DATABASE: postgres
+      MARKET_ORIGIN: ${MARKET_ORIGIN:?Configure MARKET_ORIGIN in .env}
+      MARKET_KEY_FILE: /run/secrets/market_key
+      MARKET_TRUSTED_PROXIES: 172.30.44.10
+      PGHOST: db
+      PGDATABASE: campus
+      PGUSER: campus_app
+      PGPASSWORD_FILE: /run/secrets/db_app_password
+    secrets:
+      - market_key
+      - db_app_password
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      frontend:
+        ipv4_address: 172.30.44.20
+      database: {}
+    read_only: true
+    tmpfs: ["/tmp:size=64m,mode=1777"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,urllib.request,urllib.parse; o=urllib.parse.urlsplit(os.environ['MARKET_ORIGIN']); urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8000/style.css',headers={'Host':o.netloc}),timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  web:
+    image: nginx:stable-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    ports:
+      - "${BIND_IP:-0.0.0.0}:443:443"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./deploy/tls:/etc/nginx/tls:ro
+    networks:
+      frontend:
+        ipv4_address: 172.30.44.10
+    security_opt: [no-new-privileges:true]
+volumes:
+  postgres_data:
+networks:
+  frontend:
+    ipam:
+      config:
+        - subnet: 172.30.44.0/24
+  database:
+    internal: true
+secrets:
+  db_admin_password:
+    file: .secrets/db_admin_password
+  db_app_password:
+    file: .secrets/db_app_password
+  market_key:
+    file: .secrets/market.key
