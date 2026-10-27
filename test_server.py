@@ -94,14 +94,19 @@ class PostgresTests(unittest.TestCase):
 
     def test_sqlite_import_and_refusal_to_overwrite(self):
         from migrate_database import migrate
+        import simulation
         # Populate the isolated SQLite source, then return to the empty PG target.
         with patch.dict(os.environ, {'MARKET_DATABASE': 'sqlite'}):
             app.init()
             cookie, csrf = self.fixture.register('import@example.test')
+            simulation.create_batch('imported-simulation')
         counts = migrate(app.DB)
-        self.assertEqual(counts['users'], 1)
+        self.assertEqual(counts['users'], 6)
+        self.assertEqual(counts['simulation_users'], 5)
+        self.assertEqual(counts['simulation_listings'], 5)
+        self.assertEqual(counts['simulation_purchases'], 5)
         with app.connect() as db:
-            user = db.execute('SELECT * FROM users').fetchone()
+            user = db.execute('SELECT * FROM users ORDER BY id').fetchone()
             self.assertEqual(app.MARKET.name(user['name'], user['id']), 'Cliente Fictício')
             self.assertEqual(app.MARKET.profile(db, user['id']), PROFILE)
             self.assertEqual(db.execute('SELECT COUNT(*) FROM sessions').fetchone()[0], 0)
@@ -109,7 +114,26 @@ class PostgresTests(unittest.TestCase):
             migrate(app.DB)
         self.fixture.register('after-import@example.test')
         with app.connect() as db:
-            self.assertEqual(db.execute('SELECT COUNT(*) FROM users').fetchone()[0], 2)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM users').fetchone()[0], 7)
+        self.assertIn('imported-simulation', simulation.render(app.connect, app.MARKET, 1))
+
+    def test_simulation_batch_and_snapshot(self):
+        import simulation
+        result = simulation.create_batch('postgres-batch')
+        self.assertEqual(len(result['purchases']), 5)
+        self.assertIsNone(simulation.create_batch('postgres-batch'))
+        page = simulation.render(app.connect, app.MARKET, 1)
+        self.assertIn('postgres-batch', page)
+        with app.connect() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM simulation_users').fetchone()[0], 5)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM purchases WHERE buyer_id=seller_id').fetchone()[0], 0)
+        with patch.object(app.MARKET, 'create_purchase', side_effect=RuntimeError('injected failure')):
+            with self.assertRaises(RuntimeError):
+                simulation.create_batch('failed-postgres-batch')
+        with app.connect() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM simulation_users').fetchone()[0], 5)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM purchases').fetchone()[0], 5)
+            self.assertFalse(db.execute('SELECT 1 FROM simulation_batches WHERE batch_id=?', ('failed-postgres-batch',)).fetchone())
 
 
 if __name__ == '__main__':

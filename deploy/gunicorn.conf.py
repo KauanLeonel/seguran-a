@@ -6,6 +6,7 @@ threads = 8
 timeout = 60
 graceful_timeout = 30
 worker_tmp_dir = '/tmp'
+control_socket_disable = True
 forwarded_allow_ips = '172.30.44.10'
 secure_scheme_headers = {'X-FORWARDED-PROTO': 'https'}
 limit_request_line = 4094

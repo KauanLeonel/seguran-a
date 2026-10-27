@@ -6,7 +6,8 @@ import sqlite3
 import app
 from database import postgres_enabled
 
-TABLES = ('users', 'profiles', 'listings', 'orders', 'purchases', 'events', 'vault_meta', 'commerce_migrations')
+TABLES = ('users', 'profiles', 'listings', 'orders', 'purchases', 'events', 'vault_meta', 'commerce_migrations',
+          'simulation_batches', 'simulation_users', 'simulation_listings', 'simulation_purchases')
 
 
 def migrate(source_path):
@@ -34,7 +35,8 @@ def migrate(source_path):
             vault.open(row['delivery'], f'order:{row["checkout_token"]}')
         app.init()
         with app.connect() as target:
-            target.connection.execute('LOCK TABLE users,profiles,listings,orders,purchases,events,sessions,checkouts IN ACCESS EXCLUSIVE MODE')
+            target.connection.execute('LOCK TABLE users,profiles,listings,orders,purchases,events,sessions,checkouts,'
+                                      'simulation_batches,simulation_users,simulation_listings,simulation_purchases IN ACCESS EXCLUSIVE MODE')
             for table in ('users', 'profiles', 'orders', 'purchases', 'events', 'sessions', 'checkouts'):
                 if target.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0]:
                     raise RuntimeError('Destino já contém dados. Importação cancelada sem sobrescrever registros.')

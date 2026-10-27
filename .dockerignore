@@ -7,6 +7,8 @@
 !vault.py
 !wsgi.py
 !generate_users.py
+!simulate_market.py
+!simulation.py
 !migrate_database.py
 !style.css
 !deploy/

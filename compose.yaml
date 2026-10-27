@@ -21,8 +21,9 @@ services:
   app:
     build: .
     restart: unless-stopped
-    environment:
+    environment: &app_environment
       MARKET_DATABASE: postgres
+      MARKET_REGISTER_LIMIT: ${MARKET_REGISTER_LIMIT:-10}
       MARKET_ORIGIN: ${MARKET_ORIGIN:?Configure MARKET_ORIGIN in .env}
       MARKET_KEY_FILE: /run/secrets/market_key
       MARKET_TRUSTED_PROXIES: 172.30.44.10
@@ -30,7 +31,7 @@ services:
       PGDATABASE: campus
       PGUSER: campus_app
       PGPASSWORD_FILE: /run/secrets/db_app_password
-    secrets:
+    secrets: &app_secrets
       - market_key
       - db_app_password
     depends_on:
@@ -49,6 +50,21 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+  simulator:
+    profiles: [simulation]
+    build: .
+    command: ["python", "simulate_market.py"]
+    restart: unless-stopped
+    environment: *app_environment
+    secrets: *app_secrets
+    depends_on:
+      app:
+        condition: service_healthy
+    networks: [database]
+    read_only: true
+    tmpfs: ["/tmp:size=64m,mode=1777"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
   web:
     image: nginx:stable-alpine
     restart: unless-stopped

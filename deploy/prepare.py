@@ -23,7 +23,7 @@ def main():
     args = parser.parse_args()
     ip = str(ipaddress.IPv4Address(args.ip))
     if sys.platform != 'linux' or os.geteuid() != 0:
-        parser.error('Execute na VM Ubuntu com sudo python3 deploy/prepare.py.')
+        parser.error('Execute na VM Kali Linux com sudo python3 deploy/prepare.py.')
     secret_dir = ROOT / '.secrets'
     secret_dir.mkdir(mode=0o700, exist_ok=True)
     os.chmod(secret_dir, 0o700)

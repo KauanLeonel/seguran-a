@@ -197,6 +197,42 @@ class Commerce:
     def order_list(self, orders):
         return '<ul>' + (''.join(f'<li><a href="/order?id={o["id"]}">Pedido #{o["id"]} · {esc(o["title"])} · {STATES[o["status"]]} →</a><p>{money(o["total_cents"])}</p></li>' for o in orders) or '<li>Seus pedidos aparecerão aqui.</li>') + '</ul>'
 
+    def create_purchase(self, db, uid, token, quantity, shipping_method):
+        """Create an order inside the caller's inventory transaction."""
+        import time
+        from datetime import date
+        previous = db.execute('SELECT id FROM purchases WHERE checkout_token=? AND buyer_id=?', (token, uid)).fetchone()
+        if previous:
+            return previous['id']
+        checkout = db.execute('SELECT * FROM checkouts WHERE token=? AND user_id=? AND expires>?', (token, uid, time.time())).fetchone()
+        if not checkout:
+            raise ValueError('Compra expirada. Escolha o produto novamente no catálogo.')
+        product = db.execute('SELECT * FROM listings WHERE id=?', (checkout['listing_id'],)).fetchone()
+        if product['seller_id'] == uid:
+            raise ValueError('Você não pode comprar seu próprio anúncio.')
+        if not re.fullmatch(r'[0-9]{1,2}', quantity) or not 1 <= int(quantity) <= 10:
+            raise ValueError('Quantidade deve ser de 1 a 10.')
+        quantity = int(quantity)
+        shipping = {'standard': 1500, 'express': 3000}.get(shipping_method)
+        if shipping is None:
+            raise ValueError('Escolha uma entrega válida.')
+        changed = db.execute('UPDATE listings SET stock=stock-? WHERE id=? AND stock>=?', (quantity, product['id'], quantity)).rowcount
+        if not changed:
+            raise ValueError('Estoque insuficiente. Escolha outra quantidade.')
+        p = self.profile(db, uid)
+        if not all(p.values()):
+            raise ValueError('Preencha seus dados pessoais antes de comprar.')
+        if (int(p['expiry'][3:]), int(p['expiry'][:2])) < (date.today().year, date.today().month):
+            raise ValueError('Cartão expirado. Atualize os dados no perfil.')
+        user = db.execute('SELECT name FROM users WHERE id=?', (uid,)).fetchone()
+        delivery = {k: p[k] for k in ('phone', 'street', 'number', 'district', 'city', 'state', 'zip')}
+        delivery['name'] = self.name(user['name'], uid)
+        total = quantity*product['cents'] + shipping
+        cur = db.execute('INSERT INTO purchases(buyer_id,seller_id,listing_id,title,quantity,unit_cents,shipping_cents,total_cents,delivery,card_last4,status,tracking,checkout_token) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+            (uid, product['seller_id'], product['id'], product['title'], quantity, product['cents'], shipping, total,
+             self.vault.seal(delivery, f'order:{token}'), p['card'][-4:], 'paid' if product['seller_id'] else 'shipped', 'CM'+secrets.token_hex(6).upper(), token))
+        return cur.lastrowid
+
     def post(self, h, s, get, verify_password):
         if h.path not in ('/profile', '/sell', '/buy', '/delivery'):
             return False
@@ -227,41 +263,9 @@ class Commerce:
                     db.execute('INSERT INTO listings(seller_id,title,description,cents,stock) VALUES(?,?,?,?,?)', (uid, title, description, cents, stock))
                     destination = '/sales'
                 elif h.path == '/buy':
-                    import time
                     db.execute('BEGIN IMMEDIATE')
-                    previous = db.execute('SELECT id FROM purchases WHERE checkout_token=? AND buyer_id=?', (get('checkout'), uid)).fetchone()
-                    if previous:
-                        destination = f'/order?id={previous["id"]}'
-                    else:
-                        checkout = db.execute('SELECT * FROM checkouts WHERE token=? AND user_id=? AND expires>?', (get('checkout'), uid, time.time())).fetchone()
-                        if not checkout:
-                            raise ValueError('Compra expirada. Escolha o produto novamente no catálogo.')
-                        product = db.execute('SELECT * FROM listings WHERE id=?', (checkout['listing_id'],)).fetchone()
-                        if product['seller_id'] == uid:
-                            raise ValueError('Você não pode comprar seu próprio anúncio.')
-                        if not re.fullmatch(r'[0-9]{1,2}', get('quantity')) or not 1 <= int(get('quantity')) <= 10:
-                            raise ValueError('Quantidade deve ser de 1 a 10.')
-                        quantity = int(get('quantity'))
-                        shipping = {'standard': 1500, 'express': 3000}.get(get('shipping'))
-                        if shipping is None:
-                            raise ValueError('Escolha uma entrega válida.')
-                        changed = db.execute('UPDATE listings SET stock=stock-? WHERE id=? AND stock>=?', (quantity, product['id'], quantity)).rowcount
-                        if not changed:
-                            raise ValueError('Estoque insuficiente. Escolha outra quantidade.')
-                        p = self.profile(db, uid)
-                        if not all(p.values()):
-                            raise ValueError('Preencha seus dados pessoais antes de comprar.')
-                        from datetime import date
-                        if (int(p['expiry'][3:]), int(p['expiry'][:2])) < (date.today().year, date.today().month):
-                            raise ValueError('Cartão expirado. Atualize os dados no perfil.')
-                        user = db.execute('SELECT name FROM users WHERE id=?', (uid,)).fetchone()
-                        delivery = {k: p[k] for k in ('phone', 'street', 'number', 'district', 'city', 'state', 'zip')}
-                        delivery['name'] = self.name(user['name'], uid)
-                        total = quantity*product['cents'] + shipping
-                        cur = db.execute('INSERT INTO purchases(buyer_id,seller_id,listing_id,title,quantity,unit_cents,shipping_cents,total_cents,delivery,card_last4,status,tracking,checkout_token) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
-                            (uid, product['seller_id'], product['id'], product['title'], quantity, product['cents'], shipping, total,
-                             self.vault.seal(delivery, f'order:{checkout["token"]}'), p['card'][-4:], 'paid' if product['seller_id'] else 'shipped', 'CM'+secrets.token_hex(6).upper(), checkout['token']))
-                        destination = f'/order?id={cur.lastrowid}'
+                    order_id = self.create_purchase(db, uid, get('checkout'), get('quantity'), get('shipping'))
+                    destination = f'/order?id={order_id}'
                 else:
                     if get('action') == 'ship':
                         changed = db.execute("UPDATE purchases SET status='shipped' WHERE id=? AND seller_id=? AND status='paid'", (get('order'), uid)).rowcount

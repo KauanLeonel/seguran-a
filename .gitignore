@@ -10,3 +10,5 @@ __pycache__/
 backups/
 deploy/tls/
 .pg-test/
+generate-users.log
+generate-users.pid

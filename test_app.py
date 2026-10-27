@@ -302,20 +302,45 @@ class SecurityTests(unittest.TestCase):
         with app.connect() as db:
             self.assertEqual(app.MARKET.profile(db, 1), PROFILE)
 
-    def test_generator_creates_users_through_http_every_minute(self):
+    def test_generator_creates_batches_through_http(self):
         import generate_users
         from unittest.mock import patch
+        # The fixture binds IPv4; avoid slow IPv6 localhost fallbacks on Windows.
+        self.server.authority = f'127.0.0.1:{self.port}'
+        self.server.origin = f'http://{self.server.authority}'
         sleeps = []
-        with patch('builtins.print'):
-            self.assertEqual(generate_users.run(self.server.origin, count=2, sleep=sleeps.append), 2)
-        self.assertEqual(len(sleeps), 1)
-        self.assertTrue(0 < sleeps[0] <= 60)
+        def wait(delay):
+            # Fail on retry waits instead of hiding an integration error forever.
+            self.assertLess(delay, 30)
+            sleeps.append(delay)
+        with patch('builtins.print'), patch.dict('os.environ', {'MARKET_REGISTER_LIMIT': '120'}):
+            self.assertEqual(generate_users.run(self.server.origin, count=21, sleep=wait), 21)
+        self.assertEqual(len(sleeps), 2)
+        self.assertTrue(all(0 < delay <= 30 for delay in sleeps))
         with app.connect() as db:
             users = db.execute('SELECT id,email FROM users').fetchall()
-            self.assertEqual(len(users), 2)
-            self.assertNotEqual(users[0]['email'], users[1]['email'])
+            self.assertEqual(len(users), 21)
+            self.assertEqual(len({user['email'] for user in users}), 21)
             for user in users:
                 self.assertTrue(all(app.MARKET.profile(db, user['id']).values()))
+
+    def test_generator_limit_does_not_raise_login_limit(self):
+        import time
+        from unittest.mock import patch
+        with patch.dict('os.environ', {'MARKET_REGISTER_LIMIT': '120'}):
+            self.register('generator@example.test')
+            app.ATTEMPTS[('auth', '127.0.0.1')].extend([time.monotonic()] * 10)
+            _, headers, page = self.request('/login')
+            fields = {'csrf': self.csrf(page), 'email': 'generator@example.test', 'password': 'long-test-password'}
+            self.assertEqual(self.request('/login', fields, headers['Set-Cookie'].split(';')[0])[0], 429)
+            self.register('still-allowed@example.test')
+        # Default registration capacity is still ten, independently of login.
+        with patch.dict('os.environ', {'MARKET_REGISTER_LIMIT': '10'}):
+            app.ATTEMPTS[('register', '127.0.0.1')].extend([time.monotonic()] * 10)
+            _, headers, page = self.request('/register')
+            fields = {**PROFILE, 'csrf': self.csrf(page), 'name': 'Cliente Fictício',
+                      'email': 'blocked@example.test', 'password': 'long-test-password'}
+            self.assertEqual(self.request('/register', fields, headers['Set-Cookie'].split(';')[0])[0], 429)
 
 
 if __name__ == '__main__':

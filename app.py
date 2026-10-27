@@ -15,9 +15,10 @@ from collections import defaultdict, deque
 from contextlib import contextmanager
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 from commerce import Commerce, profile_fields, validate_profile, PROFILE_FIELDS
 from database import postgres_enabled, connect_postgres
+from simulation import init_schema as init_simulation, render as render_simulation
 
 ROOT = Path(__file__).resolve().parent
 DB = ROOT / 'data' / 'market.db'
@@ -79,6 +80,8 @@ def init():
           ip TEXT NOT NULL, kind TEXT NOT NULL);
         ''')
     MARKET = Commerce(connect, KEY_PATH, PRODUCTS)
+    with connect() as db:
+        init_simulation(db)
 
 
 def event(ip, kind):
@@ -194,11 +197,12 @@ class Handler(BaseHTTPRequestHandler):
     def form(self, action, fields, label, session):
         return f'<form method="post" action="{action}"><input type="hidden" name="csrf" value="{esc(session["csrf"])}">{fields}<button>{label}</button></form>'
 
-    def page(self, title, content, session):
+    def page(self, title, content, session, refresh=False):
         nav = '<a href="/login">Entrar</a><a class="pill" href="/register">Criar conta</a>'
         if session['user_id']:
-            nav = '<a href="/sales">Minhas vendas</a><a href="/account">Minha conta</a>' + self.form('/logout', '', 'Sair', session)
-        return f'''<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{esc(title)} · Campus Market</title><link rel="stylesheet" href="/style.css"></head>
+            nav = '<a href="/simulation">Simulação</a><a href="/sales">Minhas vendas</a><a href="/account">Minha conta</a>' + self.form('/logout', '', 'Sair', session)
+        refresh_tag = '<meta http-equiv="refresh" content="10">' if refresh else ''
+        return f'''<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">{refresh_tag}<title>{esc(title)} · Campus Market</title><link rel="stylesheet" href="/style.css"></head>
         <body><header><a class="brand" href="/">◈ Campus<span>Market</span></a><nav>{nav}</nav></header>
         <main>{content}</main><footer>Campus Market <span>Essenciais para acompanhar o seu dia.</span></footer></body></html>'''
 
@@ -225,6 +229,20 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == '/style.css':
             return self.reply(200, (ROOT / 'style.css').read_text(encoding='utf-8'), 'text/css; charset=utf-8')
         s = self.session()
+        if urlsplit(self.path).path == '/simulation':
+            if not s['user_id']:
+                return self.reply(303, location='/login')
+            try:
+                query = parse_qs(urlsplit(self.path).query, max_num_fields=1, keep_blank_values=True)
+                value = query.get('page', ['1'])
+                if set(query) - {'page'} or len(value) != 1 or not value[0].isascii() or not value[0].isdigit() or len(value[0]) > 6:
+                    raise ValueError()
+                page = int(value[0])
+                if page < 1:
+                    raise ValueError()
+            except ValueError:
+                return self.reply(400, 'Página de registros inválida.')
+            return self.reply(200, self.page('Simulação', render_simulation(connect, MARKET, page), s, refresh=True))
         if MARKET.get(self, s):
             return
         if self.path == '/':
@@ -283,7 +301,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(403, 'Formulário expirado ou inválido. Recarregue a página.')
         if self.path in ('/login', '/register'):
             email, password = get('email').strip().lower(), get('password')
-            if limited(('auth', self.client_address[0]), 10, 300):
+            # Opt-in registration capacity for the lab generator; login stays limited.
+            registering = self.path == '/register'
+            maximum = max(1, int(os.environ.get('MARKET_REGISTER_LIMIT', '10'))) if registering else 10
+            if limited(('register' if registering else 'auth', self.client_address[0]), maximum, 300):
                 event(self.client_address[0], 'limite_autenticacao')
                 return self.reply(429, 'Muitas tentativas. Aguarde cinco minutos.')
             if not (3 <= len(email) <= 120 and '@' in email and 12 <= len(password) <= 128):

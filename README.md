@@ -2,9 +2,9 @@
 
 Marketplace para a aula de segurança: contas, dados pessoais, anúncios de vendedores, estoque, compra, frete e acompanhamento de entrega. A interface é de uma loja; pagamentos e entregas são simulados.
 
-## Servidor Ubuntu e PostgreSQL
+## Servidor Kali Linux e PostgreSQL
 
-A implantação para **Ubuntu 26.04.1 / https://10.81.211.237** está em [deploy/UBUNTU.md](deploy/UBUNTU.md): PostgreSQL persistente, Gunicorn, Nginx com HTTPS, migração do SQLite e backup. O modo local abaixo continua usando SQLite em `data/market.db`; o ambiente da VM usa PostgreSQL com `MARKET_DATABASE=postgres`.
+A implantação para **Kali Linux / https://10.81.211.237** está em [deploy/KALI.md](deploy/KALI.md): PostgreSQL persistente, Gunicorn, Nginx com HTTPS, migração do SQLite e backup. O modo local abaixo continua usando SQLite em `data/market.db`; o ambiente da VM usa PostgreSQL com `MARKET_DATABASE=postgres`.
 
 ## Iniciar no Windows
 
@@ -48,19 +48,50 @@ O usuário preenche seu perfil no cadastro, sem dados pessoais predefinidos. O p
 
 A validação verifica formato e tamanho; não verifica identidade, existência de endereço nem dígitos verificadores de CPF. Para a aula, digite dados inventados. O gerador opcional usa CPF (`00000000000`), telefone (`11000000000`) e CEP (`00000000`) deliberadamente fictícios. Esses valores não são preenchidos automaticamente no formulário. Nunca use dados pessoais reais.
 
-## Gerar um usuário por minuto
+## Simular 5 usuários, 5 produtos e 5 transações a cada 10 segundos
 
-O gerador é separado: iniciar a loja não cria usuários. Com a loja aberta, execute em **outro terminal**:
+Com a loja aberta, execute em outro terminal no Windows:
+
+```powershell
+.\.venv\Scripts\python.exe simulate_market.py
+```
+
+O primeiro lote é imediato; os próximos começam a cada 10 segundos até Ctrl+C. Cada lote cria cinco contas com perfil fictício, cinco produtos (um por conta) e cinco compras entre contas diferentes, com pagamento simulado aprovado. Cada produto começa com cinco unidades; a compra consome uma. Produtos e pedidos aparecem também nas telas normais da loja.
+
+Entre com uma conta criada manualmente e abra **http://localhost:8000/simulation**, ou use **Simulação** no menu. A página mostra três tabelas com colunas semelhantes às do SQL (`users`, `listings`, `purchases`), contadores acumulados e 25 registros por tabela em cada página. Atualiza automaticamente a cada dez segundos. Mostra apenas os registros desse simulador; senhas, hashes, CPF, cartões e endereços não são exibidos. Os nomes fictícios são decifrados apenas para exibição. Os nomes, perfis e entregas permanecem criptografados no banco.
+
+Para gerar somente o lote do intervalo atual:
+
+```powershell
+.\.venv\Scripts\python.exe simulate_market.py --once
+```
+
+O script usa diretamente o mesmo banco e a mesma chave da aplicação. No Windows, usa o SQLite local por padrão; no Kali, execute no container configurado com PostgreSQL, seguindo [deploy/KALI.md](deploy/KALI.md#simulação-completa-a-cada-10-segundos). Não precisa aumentar o limite de cadastros HTTP. Cada lote é uma transação atômica e tem identificação persistente por intervalo para evitar duplicação após reinício ou início duplicado. Uma falha reverte o lote inteiro e o modo contínuo tenta novamente após o intervalo. `--interval` permite outro intervalo em segundos. Encerre o gerador anterior de usuários se quiser manter somente este ritmo de cinco contas por dez segundos. Se um lote demorar mais que o intervalo, o próximo começa ao terminar o anterior, sem sobreposição.
+
+## Gerar apenas usuários (opcional: 10 a cada 30 segundos)
+
+O gerador é separado: iniciar a loja não cria usuários. Para permitir esse ritmo no modo Windows, inicie a loja no PowerShell com o limite de cadastro do laboratório (120 tentativas por IP a cada cinco minutos):
+
+```powershell
+$env:MARKET_REGISTER_LIMIT = '120'
+.\start.cmd
+```
+
+Se a loja já estiver aberta, encerre-a com Ctrl+C e inicie novamente nesse terminal. O limite de login continua em 10 tentativas por IP a cada cinco minutos. Sem a variável, o cadastro mantém o limite padrão de 10 tentativas por cinco minutos. No Kali/Docker, configure a variável conforme a seção do gerador opcional em [deploy/KALI.md](deploy/KALI.md).
+
+Com a loja aberta, execute em **outro terminal**:
 
 ```powershell
 .\.venv\Scripts\python.exe generate_users.py
 ```
 
-Ele cadastra o primeiro usuário imediatamente e os próximos a cada **60 segundos**, até você pressionar **Ctrl+C**. Para limitar a quantidade:
+Ele inicia o primeiro lote de **10 cadastros imediatamente** e inicia os próximos a cada **30 segundos**, até você pressionar **Ctrl+C**. Os cadastros de cada lote são sequenciais. Se o servidor levar mais que o intervalo, o próximo lote começa ao terminar o anterior, sem sobrepor lotes. Para alterar o ritmo ou limitar a quantidade total:
 
 ```powershell
-.\.venv\Scripts\python.exe generate_users.py --count 10
+.\.venv\Scripts\python.exe generate_users.py --batch-size 10 --interval 30 --count 25
 ```
+
+Nesse exemplo, serão dois lotes de 10 e um de 5. Sem `--count`, ou com `--count 0`, roda continuamente. Para o ritmo antigo, use `--batch-size 1 --interval 60`.
 
 Para HTTPS na rede local:
 
@@ -68,7 +99,7 @@ Para HTTPS na rede local:
 .\.venv\Scripts\python.exe generate_users.py --url https://192.168.1.10:8443 --ca lab.crt --count 10
 ```
 
-O script preenche todos os dados fictícios e faz cadastro por HTTP usando sessão, Origin e CSRF, sem escrever diretamente no banco. Gera e-mails únicos `@example.test` e senhas aleatórias, que não são exibidas nem salvas em arquivo. Esses usuários servem para povoar a base; crie suas contas manualmente se precisar entrar nelas. O terminal mostra apenas horário e e-mail criado. A verificação do certificado permanece ativa; em caso de erro o script para com uma mensagem.
+O script preenche todos os dados fictícios e faz cadastro por HTTP usando sessão, Origin e CSRF, sem escrever diretamente no banco. Gera e-mails únicos `@example.test` e senhas aleatórias, que não são exibidas nem salvas em arquivo. Esses usuários servem para povoar a base; crie suas contas manualmente se precisar entrar nelas. O terminal mostra horário, e-mail e contagens por lote. Falhas temporárias de conexão, HTTP 429 e HTTP 5xx são repetidas após o intervalo (ou o `Retry-After` em segundos, se maior). Erros de certificado, formulário ou outras recusas encerram o script com mensagem. A verificação do certificado permanece ativa. O gerador apenas cadastra contas; não simula navegação nem compras.
 
 Cartões aceitos: **4242 4242 4242 4242** e **5555 5555 5555 4444**, exclusivamente para simulação. Outros números são recusados. Não há campo de CVV. O pedido salva apenas os quatro últimos dígitos e uma cópia criptografada dos dados necessários à entrega, preservada mesmo se o perfil mudar depois.
 
@@ -145,4 +176,4 @@ Os eventos locais registram origens e CSRF recusados, limite de autenticação e
 
 ## Limites
 
-O modo de desenvolvimento usa http.server; a implantação Ubuntu usa Gunicorn atrás do Nginx. O projeto é destinado ao laboratório autorizado. Não publique na internet nem use cartões reais. Não há recuperação de senha, MFA, verificação de e-mail, transportadora, antifraude, pagamento real ou defesa completa contra negação de serviço. Limites em memória reiniciam com o processo. Execute em máquina virtual isolada e dentro do escopo combinado com a turma. Não há contra-ataque a visitantes.
+O modo de desenvolvimento usa http.server; a implantação Kali Linux usa Gunicorn atrás do Nginx. O projeto é destinado ao laboratório autorizado. Não publique na internet nem use cartões reais. Não há recuperação de senha, MFA, verificação de e-mail, transportadora, antifraude, pagamento real ou defesa completa contra negação de serviço. Limites em memória reiniciam com o processo. Execute em máquina virtual isolada e dentro do escopo combinado com a turma. Não há contra-ataque a visitantes.

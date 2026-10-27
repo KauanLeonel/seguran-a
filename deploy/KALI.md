@@ -1,4 +1,4 @@
-# Ubuntu 26.04.1 — rede local da aula
+# Kali Linux — rede local da aula
 
 Configuração preparada para **https://10.81.211.237**. Não precisa de domínio. A VM precisa manter esse IP; confirme reserva DHCP ou configuração estática com o responsável pela rede.
 
@@ -17,14 +17,43 @@ Apenas a porta 443 do IP informado é publicada. PostgreSQL e Gunicorn não publ
 
 Planeje 2 vCPUs, 2 GB de RAM e espaço para imagens e backups. Este é um ponto de partida para a aula, não um dimensionamento de carga.
 
-Instale Docker Engine e o plugin Compose pelo [guia oficial para Ubuntu](https://docs.docker.com/engine/install/ubuntu/), que inclui Ubuntu 26.04. Instale também `python3` e `openssl`:
+Use uma instalação do Kali na VM com disco persistente. Confirme o IP da interface conectada à rede da aula:
+
+```bash
+ip -br addr
+```
+
+Os comandos abaixo usam o repositório Docker para Debian **trixie**, conforme a [documentação oficial do Kali](https://www.kali.org/docs/containers/installing-docker-on-kali/). O plugin Compose é instalado junto com o Engine, seguindo a [documentação do Docker para Debian](https://docs.docker.com/engine/install/debian/). Se o Docker já estiver instalado e `sudo docker compose version` funcionar, pule a instalação.
+
+Prepare as ferramentas e configure a chave do repositório:
 
 ```bash
 sudo apt update
-sudo apt install -y python3 openssl
+sudo apt install -y python3 openssl curl ca-certificates
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+```
+
+Adicione o repositório. Use `trixie` explicitamente; não substitua por `kali-rolling`:
+
+```bash
+sudo tee /etc/apt/sources.list.d/docker.sources > /dev/null <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/debian
+Suites: trixie
+Components: stable
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 sudo systemctl enable --now docker
 sudo docker compose version
+sudo docker run --rm hello-world
 ```
+
+Se houver conflito com uma instalação anterior de `docker.io`, `docker-compose` ou `podman-docker`, siga a seção de remoção de pacotes conflitantes no guia do Docker antes de instalar. Não remova volumes ou diretórios de dados para resolver um conflito de pacotes.
 
 Os comandos Docker abaixo usam `sudo`; não é necessário adicionar seu usuário ao grupo docker.
 
@@ -92,7 +121,7 @@ sudo curl --cacert deploy/tls/fullchain.pem https://10.81.211.237/style.css
 
 Se mudar o IP, atualize `.env` e forneça um novo certificado com o IP correto. O preparador preserva o certificado existente; não o renova silenciosamente. Para renovar, forneça o novo par `fullchain.pem`/`privkey.pem`, confira permissões e execute `sudo docker compose restart web`.
 
-O bind limita a publicação à interface desse IP, mas não decide quais redes conseguem roteá-lo. Confirme a restrição à rede da aula no roteador/firewall. Portas publicadas pelo Docker podem contornar regras UFW; use regras compatíveis com o Docker, sem bloquear seu SSH por engano. Veja as [limitações oficiais de firewall](https://docs.docker.com/engine/install/ubuntu/#firewall-limitations).
+O bind limita a publicação à interface desse IP, mas não decide quais redes conseguem roteá-lo. Confirme a restrição à rede da aula no roteador/firewall. Portas publicadas pelo Docker podem contornar regras UFW; use regras compatíveis com o Docker, sem bloquear seu SSH por engano. Veja as [limitações oficiais de firewall](https://docs.docker.com/engine/install/debian/#firewall-limitations).
 
 ## 6. Consultar o banco
 
@@ -113,7 +142,57 @@ SELECT id, quantity, total_cents, status FROM purchases ORDER BY id;
 
 `users.name`, `profiles.data` e `purchases.delivery` aparecem criptografados. Isso é esperado. A aplicação não usa o superusuário: usa `campus_app`, sem privilégios de criar bancos, criar roles ou administrar o servidor. Ele pode criar e alterar suas próprias tabelas para executar as migrações; numa operação maior, separe também as credenciais de migração.
 
-## 7. Gerador de usuários a cada minuto
+## Simulação completa a cada 10 segundos
+
+O script `simulate_market.py` cria **5 usuários, 5 produtos e 5 transações de compra por lote**, com o primeiro lote imediato e os próximos a cada dez segundos. Usa diretamente o PostgreSQL da aplicação, com a mesma chave, criptografia e regra de estoque/compra. Os usuários têm dados fictícios e senhas aleatórias não exibidas. Cada conta anuncia um produto e compra o de outra conta. Os pedidos ficam com pagamento simulado aprovado, sem cobrança real.
+
+Encerre o gerador anterior `generate_users.py` se ele estiver rodando, para que somente o novo simulador acrescente contas. Copie os arquivos atualizados do projeto para a VM e, na pasta do projeto, execute:
+
+```bash
+sudo sh deploy/start-simulation.sh
+sudo docker compose logs -f --tail=20 simulator
+```
+
+O script atualiza as imagens, inicia os serviços, confirma um lote dentro do próprio container da aplicação e exibe as contagens do banco que alimenta o painel. Se houver falha, mostra o estado dos containers e os logs. Não execute `python3 simulate_market.py` diretamente no host Kali: sem as variáveis do container, ele usa o SQLite local, enquanto o site usa PostgreSQL. O comando Compose equivalente para iniciar os serviços é `sudo docker compose --profile simulation up -d --build --wait`.
+
+Se a página abrir sem registros, execute `sudo sh deploy/start-simulation.sh` na mesma pasta de implantação usada pelo site. Os dados criados por `generate_users.py` não aparecem no painel de simulação completa. Para diagnosticar um serviço que não gera dados:
+
+```bash
+sudo docker compose --profile simulation ps -a
+sudo docker compose logs --tail=30 simulator
+```
+
+Ctrl+C sai dos logs. O serviço `simulator` continua em segundo plano, após fechar o SSH e após reiniciar a VM quando o Docker iniciar. Para parar:
+
+```bash
+sudo docker compose --profile simulation stop simulator
+```
+
+Para gerar apenas o lote do intervalo atual, com a aplicação atualizada em execução:
+
+```bash
+sudo docker compose exec app python simulate_market.py --once
+```
+
+Entre com uma conta criada manualmente e abra **https://10.81.211.237/simulation**, ou clique em **Simulação** no menu. A página mostra tabelas de usuários, produtos e compras, com IDs, relacionamentos, estoque, valores em centavos e estados das transações. Há contadores acumulados, paginação de 25 linhas por tabela e atualização automática a cada dez segundos. Mostra apenas registros identificados como simulação; não mostra senhas, hashes, CPF, cartões nem endereços. Não é um editor SQL: as consultas são fixas e somente de leitura.
+
+Cada lote é salvo inteiro em uma única transação. Falhas revertem o lote; o serviço tenta novamente no próximo intervalo. Uma identificação persistente impede gerar duas vezes o mesmo intervalo de dez segundos após reinício ou se duas instâncias forem iniciadas. Se um lote demorar mais que dez segundos, o próximo começa ao terminar o anterior, sem sobreposição. As tabelas `simulation_*` identificam esses registros e entram nos backups normais. O gerador não começa ao abrir a loja: o perfil `simulation` precisa ser iniciado explicitamente. O novo simulador não precisa de `MARKET_REGISTER_LIMIT=120`; se somente ele for utilizado, a configuração padrão de cadastro pode ser mantida.
+
+## 7. Gerador de 10 usuários a cada 30 segundos (opcional)
+
+Na VM, acrescente ou ajuste esta variável no `.env` (preserve as outras linhas):
+
+```dotenv
+MARKET_REGISTER_LIMIT=120
+```
+
+Recrie a aplicação com o código atualizado e essa configuração:
+
+```bash
+sudo docker compose up -d --build app
+```
+
+Isso permite até 120 tentativas de cadastro por IP a cada cinco minutos, suficiente para os lotes da simulação. O limite de login continua em 10 tentativas por cinco minutos. Sem a variável, o cadastro também mantém o limite padrão de 10. Ao terminar a atividade, remova essa linha do `.env` e recrie a aplicação para restaurar o limite padrão.
 
 No Windows, com o certificado público copiado para `certificado-vm.pem`:
 
@@ -121,7 +200,29 @@ No Windows, com o certificado público copiado para `certificado-vm.pem`:
 .\.venv\Scripts\python.exe generate_users.py --url https://10.81.211.237 --ca certificado-vm.pem
 ```
 
-O gerador continua usando a rota normal de cadastro, sem acesso direto ao PostgreSQL. Ctrl+C encerra; `--count 10` limita a dez contas. Não é iniciado automaticamente no servidor.
+O gerador cadastra o primeiro lote de 10 imediatamente e os próximos a cada 30 segundos, continuamente. Continua usando a rota normal de cadastro, sem acesso direto ao PostgreSQL. Ctrl+C encerra; `--count 25` limita o total a 25 contas. `--batch-size` e `--interval` ajustam o tamanho e o intervalo dos lotes. Não é iniciado automaticamente no servidor. Ele apenas cadastra contas fictícias; não realiza compras.
+
+Para executar o gerador na própria VM Kali, a biblioteca padrão do Python é suficiente:
+
+```bash
+sudo python3 generate_users.py --url https://10.81.211.237 --ca deploy/tls/fullchain.pem
+```
+
+Para continuar rodando depois de fechar o terminal SSH, execute na pasta do projeto:
+
+```bash
+sudo sh -c 'nohup python3 -u generate_users.py --url https://10.81.211.237 --ca deploy/tls/fullchain.pem > generate-users.log 2>&1 < /dev/null & echo $! > generate-users.pid'
+```
+
+Inicie apenas uma instância. Para acompanhar e depois encerrar esse processo:
+
+```bash
+sudo tail -f generate-users.log
+# Ctrl+C sai da visualização do log; o gerador continua rodando.
+sudo sh -c 'kill "$(cat generate-users.pid)"'
+```
+
+Falhas temporárias de conexão, HTTP 429 e HTTP 5xx são repetidas após o intervalo configurado (ou após `Retry-After` em segundos, se maior). Erros de certificado ou cadastro inválido encerram o gerador. Se um lote demorar mais que 30 segundos, o próximo começa ao terminar o anterior, sem sobreposição. O modo `nohup` continua após sair do SSH, mas não reinicia automaticamente após reboot da VM.
 
 ## 8. Backup e restauração
 
